@@ -9,6 +9,13 @@
 #include <string>
 using namespace std;
 
+
+#define SENSOR_RATE     2ms //500 Hz
+#define PC_BAUD_RATE  115200
+
+
+//force sensor
+#define SENSOR_VDD 3.3
 #define MOSI    PE_6    
 #define MISO    PE_5     
 #define CLK     PE_2      
@@ -19,187 +26,173 @@ constexpr char wakeup[3]            = {0x00, 0X33, 0X00};  // risponde 0033
 constexpr char reset[3]             = {0x11, 0X00, 0X00};  //risponde con ff26
 constexpr char resetCRC[3]          = {0X1F, 0X1F, 0X00};
 constexpr char dummyCmd[3]          = {0x00, 0X00, 0X00};
-constexpr char readClockCmd[3]      = {0xA1, 0X80, 0X00};  
+constexpr char readClockCmd[3]      = {0xA1, 0X80, 0X00};  //read clock register
+
+constexpr char writeClockCmd[3]     = {0x61, 0X80, 0X00};  //write clock register
+constexpr char ClockMsg[3]          = {0x3F, 0X1A, 0X00};  //msg da inviare al clock per 500SPS
+
+constexpr char write_osr_500sps[6]          = {0x61, 0X80, 0X00, 0x3F, 0X1A, 0X00};
+constexpr char write_osr_1000sps[6]         = {0x61, 0X80, 0X00, 0x3F, 0X16, 0X00};
+constexpr char write_osr_2000sps[6]         = {0x61, 0X80, 0X00, 0x3F, 0X12, 0X00};
+constexpr char write_osr_4000sps[6]         = {0x61, 0X80, 0X00, 0x3F, 0X0E, 0X00};
+
 constexpr char readidregCmd[3]      = {0x00, 0Xa0, 0X00};
-constexpr char readGAIN1_REGCmd[3]  = {0xA2, 0X00, 0X00}; //RESET(0000h)
-constexpr char writeGAIN1_REGCmd[3] = {0x62, 0X00, 0X00}; //echo 0x42 0x00
-constexpr char write4GAIN1_REGCmd[3]= {0x11, 0X11, 0X00}; //
+constexpr char readGAIN1_REGCmd[3]  = {0xA2, 0X00, 0X00};  //RESET(0000h)
+constexpr char writeGAIN1_REGCmd[3] = {0x62, 0X00, 0X00};  //echo 0x42 0x00
+constexpr char write4GAIN1_REGCmd[3]= {0x11, 0X11, 0X00};  //
+
+
+double codToNperVolt[6] = {0.021366862951596, 0.021957198382339, 0.019318183316805, 0.000262142472899, 0.000266067418322, 0.000386155074803};
+double voltage = SENSOR_VDD;
+double codToN[6];
+char status[3]          = {0x00, 0X00, 0X00}; // Comando null -> risponde con status register
+char readCommand1[24]   = {0};
+
+int32_t offset[6];
+
+
+
+
+float  wrench[6]; //
+uint8_t buff[25];
+static BufferedSerial pc(USBTX, USBRX);
 
 
 SPI spi(MOSI, MISO, CLK);
 DigitalOut cs(CS);
 
+
+/* buff_out len 1+24 =25, meas len 6, meas dim 4 B (float) */
+void serialize( uint8_t* buffer, const float* wrench){
+    buffer[0]  = '$';
+    uint32_t val =*((uint32_t*)&wrench[0]);
+    buffer[1]  = val >> 24;
+    buffer[2]  = val >> 16;
+    buffer[3]  = val >> 8;
+    buffer[4]  = val;
+    val =*((uint32_t*)&wrench[1]);
+    buffer[5]  = val >> 24;
+    buffer[6]  = val >> 16;
+    buffer[7]  = val >> 8;
+    buffer[8]  = val;
+    val =*((uint32_t*)&wrench[2]);
+    buffer[9]  = val >> 24;
+    buffer[10] = val >> 16;
+    buffer[11] = val >> 8;
+    buffer[12] = val;
+    val =*((uint32_t*)&wrench[3]);
+    buffer[13] = val >> 24;
+    buffer[14] = val >> 16;
+    buffer[15] = val >> 8;
+    buffer[16] = val;
+    val =*((uint32_t*)&wrench[4]);
+    buffer[17] = val >> 24;
+    buffer[18] = val >> 16;
+    buffer[19] = val >> 8;
+    buffer[20] = val;
+    val =*((uint32_t*)&wrench[5]);
+    buffer[21] = val >> 24;
+    buffer[22] = val >> 16;
+    buffer[23] = val >> 8;
+    buffer[24] = val;
+}
+
+
+
 int main() {
+
+    pc.set_baud(PC_BAUD_RATE);
+
+    // INIT
+    for(int i = 0; i<6;i++){
+        codToN[i] = codToNperVolt[i]/voltage;
+    }
+
     spi.format(8, 1); // Formato: 8 bit di dati, modalità 1
     spi.frequency(1000000); // Frequenza SPI
-
     cs = 0; // Attiva il chip select
     
-    char status[3]          = {0x00, 0X00, 0X00}; // Comando null -> risponde con status register
-    char readCommand1[24]   = {0};
-    char clock_reg[3]       = {0x03, 0x00, 0x00};
+    
     
     int32_t hex_val;
-    int32_t ch[6] {0,0,0,0,0,0}; 
+    
 
 //******INIT******reset-unlock-wakeup-readclock(check 3F0Eh)
+    
+    ThisThread::sleep_for(2000ms);
+//read clock reg
+    spi.write(readClockCmd,3,readCommand1,24);
+    spi.write(nullptr,0,readCommand1,24);
+    printf("\n\nClock_reg: %02x %02x %02x\n", readCommand1[0], readCommand1[1], readCommand1[2]);
+    ThisThread::sleep_for(2000ms);
+
+//write clock reg ( ? )
+    printf("writing clock register...");    
+    spi.write(write_osr_500sps,6,readCommand1,24);
+    spi.write(nullptr,0,readCommand1,24);
+    printf("\n\nResponse: %02x %02x %02x\n", readCommand1[0], readCommand1[1], readCommand1[2]);
+    ThisThread::sleep_for(500ms);
+
+
 
     spi.write(readClockCmd,3,readCommand1,24);
     spi.write(nullptr,0,readCommand1,24);
     printf("\n\nClock_reg: %02x %02x %02x\n", readCommand1[0], readCommand1[1], readCommand1[2]);
     ThisThread::sleep_for(2000ms);
 
-//Scrittura sul registro GAIN1 -> 4 
-    spi.write(readGAIN1_REGCmd,3,readCommand1,24);
-    spi.write(nullptr,0,readCommand1,24);  
-    printf("GAIN1 Register: "); 
-    for (int i=0; i<24; ++i) 
-        printf("%02x ", readCommand1[i]);
-    printf("\n");
-    //printf("GAIN1 Register: %02x %02x %02x\n", readCommand1[0], readCommand1[1], readCommand1[2]);
-    ThisThread::sleep_for(2000ms);
-/*
-    spi.write(writeGAIN1_REGCmd,3,readCommand1,24);
-    spi.write(nullptr,0,readCommand1,24);   
-    printf("Write GAIN1 Register: %02x %02x %02x\n", readCommand1[0], readCommand1[1], readCommand1[2]);
 
-    spi.write(write4GAIN1_REGCmd,3,readCommand1,24);
-    spi.write(nullptr,0,readCommand1,24);   
-    printf("Write 4 GAIN1 Register: %02x %02x %02x\n", readCommand1[0], readCommand1[1], readCommand1[2]);
-*/
-    printf("\n*************\n**START**\n\n\n");
 
     spi.write(status, 3, readCommand1, 24);
-    float fx      = 0.0;
-    float fy      = 0.0;
-    float fz      = 0.0;
-    float meanx   = 0.0;
-    float meany   = 0.0;
-    float meanz   = 0.0;
 
-    float mx      = 0.0;
-    float my      = 0.0;
-    float mz      = 0.0;
-    float meanmx  = 0.0;
-    float meanmy  = 0.0;
-    float meanmz  = 0.0;
+ 
 
-    float FXsens = (0.00427/5)*3.3;
-    float FYsens = (0.00439/5)*3.3;
-    float FZsens = (0.00386/5)*3.3;
-
-    for (int i=0; i<100; ++i) {
+// void compute_offset()
+    int N_sample = 100;
+    for (int i=0; i<N_sample; ++i) {
         spi.write(status, 3, readCommand1, 24);
-        hex_val = ((readCommand1[3] << 16) | (readCommand1[4] << 8) | (readCommand1[5])) & 0x00FFFFFF;
-        if(hex_val > 0x7FFFFF)    // if(ch[k] & (1 << 23))
-            hex_val = - ((~hex_val & 0x00FFFFFF) + 1);  // twos complement
-        fx += hex_val;
 
-        hex_val = ((readCommand1[6] << 16) | (readCommand1[7] << 8) | (readCommand1[8])) & 0x00FFFFFF;
-        if(hex_val > 0x7FFFFF)    // if(ch[k] & (1 << 23))
-            hex_val = - ((~hex_val & 0x00FFFFFF) + 1);  // twos complement
-        fy += hex_val;
+        for(int j=0;j<6;j++){
+            hex_val = ((readCommand1[3+j*3] << 16) | (readCommand1[4+j*3] << 8) | (readCommand1[5+j*3])) & 0x00FFFFFF;
+            if(hex_val > 0x7FFFFF) hex_val = - ((~hex_val & 0x00FFFFFF) + 1);  // twos complement
 
-        hex_val = ((readCommand1[9] << 16) | (readCommand1[10] << 8) | (readCommand1[11])) & 0x00FFFFFF;
-        if(hex_val > 0x7FFFFF)    // if(ch[k] & (1 << 23))
-            hex_val = - ((~hex_val & 0x00FFFFFF) + 1);  // twos complement
-        fz += hex_val;
-//****MX MY MZ
-
-        hex_val = ((readCommand1[12] << 16) | (readCommand1[13] << 8) | (readCommand1[14])) & 0x00FFFFFF;
-        if(hex_val > 0x7FFFFF)    // if(ch[k] & (1 << 23))
-            hex_val = - ((~hex_val & 0x00FFFFFF) + 1);  // twos complement
-        mx += hex_val;
-
-        hex_val = ((readCommand1[15] << 16) | (readCommand1[16] << 8) | (readCommand1[17])) & 0x00FFFFFF;
-        if(hex_val > 0x7FFFFF)    // if(ch[k] & (1 << 23))
-            hex_val = - ((~hex_val & 0x00FFFFFF) + 1);  // twos complement
-        my += hex_val;
-
-        hex_val = ((readCommand1[18] << 16) | (readCommand1[19] << 8) | (readCommand1[20])) & 0x00FFFFFF;
-        if(hex_val > 0x7FFFFF)    // if(ch[k] & (1 << 23))
-            hex_val = - ((~hex_val & 0x00FFFFFF) + 1);  // twos complement
-        mz += hex_val;
+            offset[j] += hex_val; //TODO potrebbe essere in float
+        }
+        
     }
-    meanx=fx/100;
-    meany=fy/100;
-    meanz=fz/100;
-    meanmx=mx/100;
-    meanmy=my/100;
-    meanmz=mz/100;
-    printf("\nMean Fx: \t%4f\n",meanx);
-    printf("\nMean Fy: \t%4f\n",meany);
-    printf("\nMean Fz: \t%4f\n",meanz);
-    printf("\nMean Mx: \t%4f\n",meanmx);
-    printf("\nMean My: \t%4f\n",meanmy);
-    printf("\nMean Mz: \t%4f\n",meanmz);
+    
+    for (int j =0;j<6;j++){
+        offset[j] /= N_sample;
+    }
+
+    printf("\nOffset =[ ");     //debug
+    for (int j =0;j<6;j++){
+        printf("%d \t",offset[j]);
+    }
+    printf("]\n\n");
+
 
     
     while (1) {
 
         spi.write(status, 3, readCommand1, 24);
-        fx=0.0;
-        fy=0.0;
-        fz=0.0;
-        //for (int i=0; i<20; ++i) {
-            hex_val = ((readCommand1[3] << 16) | (readCommand1[4] << 8) | (readCommand1[5])) & 0x00FFFFFF;
-            if(hex_val > 0x7FFFFF)    // if(ch[k] & (1 << 23))
-                hex_val = - ((~hex_val & 0x00FFFFFF) + 1);  // twos complement
-            fx+=(hex_val-meanx)*FXsens;
-            
-            hex_val = ((readCommand1[6] << 16) | (readCommand1[7] << 8) | (readCommand1[8])) & 0x00FFFFFF;
-            if(hex_val > 0x7FFFFF)    // if(ch[k] & (1 << 23))
-                hex_val = - ((~hex_val & 0x00FFFFFF) + 1);  // twos complement
-            fy+=(hex_val-meany)*FYsens;
+               
+        for(int j=0;j<6;j++){
+            hex_val = ((readCommand1[3+j*3] << 16) | (readCommand1[4+j*3] << 8) | (readCommand1[5+j*3])) & 0x00FFFFFF;
+            if(hex_val > 0x7FFFFF) hex_val = - ((~hex_val & 0x00FFFFFF) + 1);  // twos complement
 
-            hex_val = ((readCommand1[9] << 16) | (readCommand1[10] << 8) | (readCommand1[11])) & 0x00FFFFFF;
-            if(hex_val > 0x7FFFFF)    // if(ch[k] & (1 << 23))
-                hex_val = - ((~hex_val & 0x00FFFFFF) + 1);  // twos complement
-            fz+=(hex_val-meanz)*FZsens;
-            wait_us(6);  
-        //}
-       // fx=fx/20.0;
-       // fy=fy/20.0;
-       // fz=fz/20.0;
-        printf("\tFx: \t%f N",fx);   
-        printf("\tFy: \t%f N",fy);
-        printf("\tFz: \t%f N\n",fz); 
+            wrench[j] =(hex_val-offset[j])*codToN[j];
+        }
+
+        // printf("\n Wrench =[ ");     //debug
+        // for (int j =0;j<6;j++){
+        //     printf("%f \t",wrench[j]);
+        // }
+        // printf("]\n\n");
         
+        serialize( buff, wrench);
+        pc.write(&buff, 25);
 
-
-/*
-        hex_val = ((readCommand1[3] << 16) | (readCommand1[4] << 8) | (readCommand1[5])) & 0x00FFFFFF;
-        if(hex_val > 0x7FFFFF)    // if(ch[k] & (1 << 23))
-            hex_val = - ((~hex_val & 0x00FFFFFF) + 1);  // twos complement
-        printf("\nFx: %4d",hex_val-meanx);
-
-        hex_val = ((readCommand1[6] << 16) | (readCommand1[7] << 8) | (readCommand1[8])) & 0x00FFFFFF;
-        if(hex_val > 0x7FFFFF)    // if(ch[k] & (1 << 23))
-            hex_val = - ((~hex_val & 0x00FFFFFF) + 1);  // twos complement
-        printf("\t\tFy: %4d",hex_val-meany);
-
-        hex_val = ((readCommand1[9] << 16) | (readCommand1[10] << 8) | (readCommand1[11])) & 0x00FFFFFF;
-        if(hex_val > 0x7FFFFF)    // if(ch[k] & (1 << 23))
-            hex_val = - ((~hex_val & 0x00FFFFFF) + 1);  // twos complement
-        fz=(hex_val-meanz)*FZsens;
-        printf("\t\tFz: %f N",fz);
-
-        hex_val = ((readCommand1[12] << 16) | (readCommand1[13] << 8) | (readCommand1[14])) & 0x00FFFFFF;
-        if(hex_val > 0x7FFFFF)    // if(ch[k] & (1 << 23))
-            hex_val = - ((~hex_val & 0x00FFFFFF) + 1);  // twos complement
-        printf("\t\tMx: %4d",hex_val-meanmx);
-
-        hex_val = ((readCommand1[15] << 16) | (readCommand1[16] << 8) | (readCommand1[17])) & 0x00FFFFFF;
-        if(hex_val > 0x7FFFFF)    // if(ch[k] & (1 << 23))
-            hex_val = - ((~hex_val & 0x00FFFFFF) + 1);  // twos complement
-        printf("\t\tMy: %4d",hex_val-meanmy);
-
-        hex_val = ((readCommand1[18] << 16) | (readCommand1[19] << 8) | (readCommand1[20])) & 0x00FFFFFF;
-        if(hex_val > 0x7FFFFF)    // if(ch[k] & (1 << 23))
-            hex_val = - ((~hex_val & 0x00FFFFFF) + 1);  // twos complement
-        printf("\t\tMz: %4d",hex_val-meanmz);
-*/
-        ThisThread::sleep_for(30ms);
+        ThisThread::sleep_for(SENSOR_RATE);
     }
     return 0;
 }
