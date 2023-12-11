@@ -49,6 +49,8 @@ char status[3]          = {0x00, 0X00, 0X00}; // Comando null -> risponde con st
 char readCommand1[24]   = {0};
 
 int32_t offset[6];
+SPI spi(MOSI, MISO, CLK);
+DigitalOut cs(CS);
 
 
 
@@ -58,8 +60,24 @@ uint8_t buff[25];
 static BufferedSerial pc(USBTX, USBRX);
 
 
-SPI spi(MOSI, MISO, CLK);
-DigitalOut cs(CS);
+
+//moving average
+#define MA_N_SAMPLE 10
+float ma_state[MA_N_SAMPLE] = {0.0};
+
+float ma_filter(float x){
+    float m =0.00;
+    for(int i =0;i<MA_N_SAMPLE-2 ;i++){
+        m+= ma_state[i];
+        ma_state[i] = ma_state[i+1] ;
+    }
+    m+=x;
+    ma_state[MA_N_SAMPLE-1] = x;
+
+    m = m /float(MA_N_SAMPLE);
+    return m;
+}
+
 
 
 /* buff_out len 1+24 =25, meas len 6, meas dim 4 B (float) */
@@ -181,6 +199,9 @@ int main() {
             if(hex_val > 0x7FFFFF) hex_val = - ((~hex_val & 0x00FFFFFF) + 1);  // twos complement
 
             wrench[j] =(hex_val-offset[j])*codToN[j];
+            if(j ==2){
+                wrench[j] =ma_filter(wrench[j]);
+            }
         }
 
         // printf("\n Wrench =[ ");     //debug
